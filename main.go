@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rs/cors"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -68,9 +69,18 @@ func Main() {
 }
 
 func runHandler(ctx context.Context, wg *sync.WaitGroup, name, addr string, timeouts TimeoutConfig, handler http.Handler) {
+	c := cors.New(cors.Options{
+		AllowedOrigins:   []string{"http://localhost:3000"},
+		AllowCredentials: true,
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Content-Type", "Authorization"},
+	})
+
+	handlerWithCORS := c.Handler(handler)
+
 	srv := &http.Server{
 		Addr:         addr,
-		Handler:      handler,
+		Handler:      handlerWithCORS,
 		ReadTimeout:  timeouts.ReadTimeoutDuration,
 		WriteTimeout: timeouts.WriteTimeoutDuration,
 		IdleTimeout:  timeouts.IdleTimeoutDuration,
