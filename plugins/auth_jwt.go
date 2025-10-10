@@ -6,13 +6,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	log "log/slog"
 	"net/http"
+	"os"
+	"strings"
 
+	"github.com/go-jose/go-jose/v4"
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/golang-jwt/jwt/v4/request"
 	"github.com/movio/bramble"
-	log "github.com/sirupsen/logrus"
-	"gopkg.in/square/go-jose.v2"
 )
 
 func init() {
@@ -24,7 +26,11 @@ func NewJWTPlugin(keyProviders []SigningKeyProvider, roles map[string]bramble.Op
 	for _, p := range keyProviders {
 		keys, err := p.Keys()
 		if err != nil {
-			log.WithError(err).Fatalf("couldn't get signing keys for provider %q", p.Name())
+			log.With(
+				"error", err,
+				"provider", p.Name(),
+			).Warn("failed to get signing keys for provider")
+			os.Exit(1)
 		}
 		for id, k := range keys {
 			publicKeys[id] = k
@@ -104,7 +110,7 @@ func (p *JWTPlugin) Configure(cfg *bramble.Config, data json.RawMessage) error {
 }
 
 type Claims struct {
-	jwt.StandardClaims
+	jwt.RegisteredClaims
 	Role string
 }
 
@@ -133,7 +139,7 @@ func (p *JWTPlugin) ApplyMiddlewarePublicMux(h http.Handler) http.Handler {
 			return nil, fmt.Errorf("could not find key for kid %q", keyID)
 		})
 		if err != nil {
-			log.WithError(err).Info("invalid token")
+			log.With("error", err).Info("invalid token")
 			rw.WriteHeader(http.StatusUnauthorized)
 			writeGraphqlError(rw, "invalid token")
 			return
@@ -141,7 +147,7 @@ func (p *JWTPlugin) ApplyMiddlewarePublicMux(h http.Handler) http.Handler {
 
 		role, ok := p.config.Roles[claims.Role]
 		if !ok {
-			log.WithField("role", claims.Role).Info("invalid role")
+			log.With("role", claims.Role).Info("invalid role")
 			rw.WriteHeader(http.StatusUnauthorized)
 			writeGraphqlError(rw, "invalid role")
 			return
@@ -154,18 +160,18 @@ func (p *JWTPlugin) ApplyMiddlewarePublicMux(h http.Handler) http.Handler {
 
 		ctx := r.Context()
 		ctx = bramble.AddPermissionsToContext(ctx, role)
-		ctx = addStandardJWTClaimsToOutgoingRequest(ctx, claims.StandardClaims)
+		ctx = addStandardJWTClaimsToOutgoingRequest(ctx, claims.RegisteredClaims)
 		ctx = bramble.AddOutgoingRequestsHeaderToContext(ctx, "JWT-Claim-Role", claims.Role)
 		h.ServeHTTP(rw, r.WithContext(ctx))
 	})
 }
 
-func addStandardJWTClaimsToOutgoingRequest(ctx context.Context, claims jwt.StandardClaims) context.Context {
-	if claims.Audience != "" {
-		ctx = bramble.AddOutgoingRequestsHeaderToContext(ctx, "JWT-Claim-Audience", claims.Audience)
+func addStandardJWTClaimsToOutgoingRequest(ctx context.Context, claims jwt.RegisteredClaims) context.Context {
+	if len(claims.Audience) > 0 {
+		ctx = bramble.AddOutgoingRequestsHeaderToContext(ctx, "JWT-Claim-Audience", strings.Join(claims.Audience, ","))
 	}
-	if claims.Id != "" {
-		ctx = bramble.AddOutgoingRequestsHeaderToContext(ctx, "JWT-Claim-ID", claims.Id)
+	if claims.ID != "" {
+		ctx = bramble.AddOutgoingRequestsHeaderToContext(ctx, "JWT-Claim-ID", claims.ID)
 	}
 	if claims.Issuer != "" {
 		ctx = bramble.AddOutgoingRequestsHeaderToContext(ctx, "JWT-Claim-Issuer", claims.Issuer)

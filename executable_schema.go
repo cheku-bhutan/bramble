@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	log "log/slog"
 	"sync"
 	"time"
 
 	"github.com/99designs/gqlgen/graphql"
-	log "github.com/sirupsen/logrus"
 	"github.com/vektah/gqlparser/v2/ast"
 	"github.com/vektah/gqlparser/v2/gqlerror"
 	"go.opentelemetry.io/otel"
@@ -103,30 +103,27 @@ func (s *ExecutableSchema) UpdateSchema(ctx context.Context, forceRebuild bool) 
 	// Avoid fetching more than 64 servides in parallel,
 	// as high concurrency can actually hurt performance
 	group.SetLimit(64)
-	for url_, s_ := range s.Services {
-		url := url_
-		s := s_
+	for url, s := range s.Services {
 		group.Go(func() error {
-			logger := log.WithField("url", url)
+			logger := log.With("url", url)
 			updated, err := s.Update(ctx)
 			if err != nil {
 				promServiceUpdateErrorCounter.WithLabelValues(s.ServiceURL).Inc()
 				promServiceUpdateErrorGauge.WithLabelValues(s.ServiceURL).Set(1)
 				invalidSchema, forceRebuild = true, true
-				logger.WithError(err).Error("unable to update service")
+				logger.With("error", err).Error("failed updating service")
 				// Ignore this service in this update
 				return nil
 			}
 			promServiceUpdateErrorGauge.WithLabelValues(s.ServiceURL).Set(0)
-			logger = log.WithFields(log.Fields{
-				"version": s.Version,
-				"service": s.Name,
-			})
 
 			mutex.Lock()
 			defer mutex.Unlock()
 			if updated {
-				logger.Info("service was updated")
+				logger.With(
+					"version", s.Version,
+					"service", s.Name,
+				).Info("service updated")
 				updatedServices = append(updatedServices, s.Name)
 			}
 
@@ -140,7 +137,6 @@ func (s *ExecutableSchema) UpdateSchema(ctx context.Context, forceRebuild bool) 
 	group.Wait()
 
 	if len(updatedServices) > 0 || forceRebuild {
-		log.Info("rebuilding merged schema")
 		schema, err := MergeSchemas(schemas...)
 		if err != nil {
 			invalidSchema = true
@@ -157,6 +153,7 @@ func (s *ExecutableSchema) UpdateSchema(ctx context.Context, forceRebuild bool) 
 		s.MergedSchema = schema
 		s.BoundaryQueries = boundaryQueries
 		s.mutex.Unlock()
+		log.Info("merged schema updated")
 	}
 
 	return nil
@@ -223,7 +220,7 @@ func (s *ExecutableSchema) ExecuteQuery(ctx context.Context) *graphql.Response {
 	})
 	if err != nil {
 		traceErr(err)
-		return s.interceptResponse(ctx, operation.Name, operationCtx.RawQuery, variables, graphql.ErrorResponse(ctx, err.Error()))
+		return s.interceptResponse(ctx, operation.Name, operationCtx.RawQuery, variables, graphql.ErrorResponse(ctx, "%s", err.Error()))
 	}
 
 	extensions := make(map[string]interface{})
@@ -335,7 +332,7 @@ func (s *ExecutableSchema) Schema() *ast.Schema {
 }
 
 // Complexity returns the query complexity (unimplemented)
-func (s *ExecutableSchema) Complexity(typeName, fieldName string, childComplexity int, args map[string]interface{}) (int, bool) {
+func (s *ExecutableSchema) Complexity(ctx context.Context, typeName, fieldName string, childComplexity int, args map[string]interface{}) (int, bool) {
 	// FIXME: TBD
 	return 0, false
 }

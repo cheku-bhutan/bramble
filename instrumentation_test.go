@@ -4,31 +4,29 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	log "log/slog"
 	"sync"
 	"testing"
 	"time"
 
-	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 )
 
-// can only run one test at a time that takes over the logrus output
-var logrusLock = sync.Mutex{}
+// can only run one test at a time that takes over the log output
+var logLock = sync.Mutex{}
 
-func collectLogEvent(t *testing.T, f func()) map[string]interface{} {
+func collectLogEvent(t *testing.T, o *log.HandlerOptions, f func()) map[string]interface{} {
 	t.Helper()
 	r, w := io.Pipe()
 	defer r.Close()
-	logger := log.StandardLogger()
-	prevOut := logger.Out
-	prevFmt := logger.Formatter
-	logrusLock.Lock()
-	defer logrusLock.Unlock()
-	logger.SetOutput(w)
-	logger.SetFormatter(&log.JSONFormatter{})
+	prevlogger := log.Default()
+	logLock.Lock()
+	defer logLock.Unlock()
+	log.SetDefault(log.New(log.NewJSONHandler(w, o)))
 	t.Cleanup(func() {
-		logger.SetOutput(prevOut)
-		logger.SetFormatter(prevFmt)
+		logLock.Lock()
+		defer logLock.Unlock()
+		log.SetDefault(prevlogger)
 	})
 
 	go func() {
@@ -43,9 +41,9 @@ func collectLogEvent(t *testing.T, f func()) map[string]interface{} {
 	return obj
 }
 
-func collectEventFromContext(ctx context.Context, t *testing.T, f func(*event)) map[string]interface{} {
+func collectEventFromContext(ctx context.Context, t *testing.T, o *log.HandlerOptions, f func(*event)) map[string]interface{} {
 	t.Helper()
-	return collectLogEvent(t, func() {
+	return collectLogEvent(t, o, func() {
 		e := getEvent(ctx)
 		f(e)
 		if e != nil {
@@ -54,14 +52,18 @@ func collectEventFromContext(ctx context.Context, t *testing.T, f func(*event)) 
 	})
 }
 
+func testEventName(EventFields) string {
+	return "test"
+}
+
 func TestDropsField(t *testing.T) {
 	AddField(context.TODO(), "val", "test")
 	assert.True(t, true)
 }
 
 func TestEventLogOnFinish(t *testing.T) {
-	ctx, _ := startEvent(context.TODO(), "test")
-	output := collectEventFromContext(ctx, t, func(*event) {
+	ctx, _ := startEvent(context.TODO(), testEventName)
+	output := collectEventFromContext(ctx, t, nil, func(*event) {
 		AddField(ctx, "val", "test")
 	})
 
@@ -69,8 +71,8 @@ func TestEventLogOnFinish(t *testing.T) {
 }
 
 func TestAddMultipleToEventOnContext(t *testing.T) {
-	ctx, _ := startEvent(context.TODO(), "test")
-	output := collectEventFromContext(ctx, t, func(*event) {
+	ctx, _ := startEvent(context.TODO(), testEventName)
+	output := collectEventFromContext(ctx, t, nil, func(*event) {
 		AddFields(ctx, EventFields{
 			"gizmo":   "foo",
 			"gimmick": "bar",
@@ -83,8 +85,8 @@ func TestAddMultipleToEventOnContext(t *testing.T) {
 
 func TestEventMeasurement(t *testing.T) {
 	start := time.Now()
-	ctx, _ := startEvent(context.TODO(), "test")
-	output := collectEventFromContext(ctx, t, func(*event) {
+	ctx, _ := startEvent(context.TODO(), testEventName)
+	output := collectEventFromContext(ctx, t, nil, func(*event) {
 		time.Sleep(time.Microsecond)
 	})
 
@@ -102,4 +104,36 @@ func TestEventMeasurement(t *testing.T) {
 	} else {
 		assert.Fail(t, "missing duration")
 	}
+}
+
+func TestDebugDisabled(t *testing.T) {
+	ctx, _ := startEvent(context.TODO(), testEventName)
+
+	o := &log.HandlerOptions{
+		Level: log.LevelInfo,
+	}
+
+	output := collectEventFromContext(ctx, t, o, func(e *event) {
+		if e.debugEnabled() {
+			AddField(ctx, "val", "test")
+		}
+	})
+
+	assert.Empty(t, output["val"])
+}
+
+func TestDebugEnabled(t *testing.T) {
+	ctx, _ := startEvent(context.TODO(), testEventName)
+
+	o := &log.HandlerOptions{
+		Level: log.LevelDebug,
+	}
+
+	output := collectEventFromContext(ctx, t, o, func(e *event) {
+		if e.debugEnabled() {
+			AddField(ctx, "val", "test")
+		}
+	})
+
+	assert.Equal(t, "test", output["val"])
 }

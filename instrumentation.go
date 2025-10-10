@@ -2,16 +2,15 @@ package bramble
 
 import (
 	"context"
+	log "log/slog"
 	"sync"
 	"time"
-
-	log "github.com/sirupsen/logrus"
 )
 
 const eventKey contextKey = "instrumentation"
 
 type event struct {
-	name      string
+	nameFunc  EventNameFunc
 	timestamp time.Time
 	fields    EventFields
 	fieldLock sync.Mutex
@@ -21,15 +20,18 @@ type event struct {
 // EventFields contains fields to be logged for the event
 type EventFields map[string]interface{}
 
-func newEvent(name string) *event {
+// EventNameFunc constructs a name for the event from the provided fields
+type EventNameFunc func(EventFields) string
+
+func newEvent(name EventNameFunc) *event {
 	return &event{
-		name:      name,
+		nameFunc:  name,
 		timestamp: time.Now(),
 		fields:    EventFields{},
 	}
 }
 
-func startEvent(ctx context.Context, name string) (context.Context, *event) {
+func startEvent(ctx context.Context, name EventNameFunc) (context.Context, *event) {
 	ev := newEvent(name)
 	return context.WithValue(ctx, eventKey, ev), ev
 }
@@ -48,11 +50,19 @@ func (e *event) addFields(fields EventFields) {
 	e.fieldLock.Unlock()
 }
 
+func (e *event) debugEnabled() bool {
+	return log.Default().Enabled(context.Background(), log.LevelDebug)
+}
+
 func (e *event) finish() {
 	e.writeLock.Do(func() {
-		log.WithField("duration", time.Since(e.timestamp).String()).
-			WithFields(log.Fields(e.fields)).
-			Info(e.name)
+		attrs := make([]any, 0, len(e.fields))
+		for k, v := range e.fields {
+			attrs = append(attrs, log.Any(k, v))
+		}
+		log.With(
+			"duration", time.Since(e.timestamp).String(),
+		).Info(e.nameFunc(e.fields), attrs...)
 	})
 }
 
